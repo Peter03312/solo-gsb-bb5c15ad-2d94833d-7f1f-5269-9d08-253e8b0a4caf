@@ -59,6 +59,25 @@ function initDb(dataDir) {
       FOREIGN KEY (baseline_report_id) REFERENCES reports(id) ON DELETE CASCADE,
       FOREIGN KEY (retest_report_id) REFERENCES reports(id) ON DELETE CASCADE
     );
+
+    -- 草稿修订时间线：每次成功的 定标/轮廓保存/视野保存/细胞迁移/恢复 都在同一事务内
+    -- 追加一条与写入后草稿完整一致的快照；baseline 为旧库启动补录或新上传时的可恢复基线。
+    CREATE TABLE IF NOT EXISTS image_revisions (
+      id            TEXT PRIMARY KEY,
+      image_id      TEXT NOT NULL,
+      version       INTEGER NOT NULL,        -- 该修订写入后对应的草稿版本号
+      kind          TEXT NOT NULL,           -- baseline|calibration|contours|fields|migrate|restore
+      restored_from_revision_id TEXT,        -- kind=restore 时：被恢复的修订 id
+      calib         TEXT,                    -- JSON: 同 images.calib
+      cells         TEXT NOT NULL DEFAULT '[]', -- JSON: 同 images.cells（含当时测量值）
+      fields        TEXT NOT NULL DEFAULT '[]', -- JSON: 同 images.fields
+      created_at    TEXT NOT NULL DEFAULT (datetime('now')),
+      FOREIGN KEY (image_id) REFERENCES images(id) ON DELETE CASCADE
+    );
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_image_revisions_image_version
+      ON image_revisions(image_id, version);
+    CREATE INDEX IF NOT EXISTS idx_image_revisions_image
+      ON image_revisions(image_id, created_at);
   `);
 
   // 旧版本数据库的幂等升级：缺少 fields 列时补上（旧报告缺少视野按空列表读取）

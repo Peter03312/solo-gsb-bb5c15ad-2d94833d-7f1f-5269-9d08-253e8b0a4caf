@@ -330,3 +330,42 @@ table.cmp-table td.num { text-align: right; }
 }
 .chain-history.hidden { display: none; }
 .chain-history-inner { gap: 6px; }
+
+/* 草稿修订时间线 */
+.rev-list { display: flex; flex-direction: column; gap: 7px; margin: 8px 0; }
+.rev-row {
+  border: 1px solid var(--line); border-radius: 8px;
+  padding: 8px 10px; background: var(--panel2);
+}
+.rev-row.current { border-color: var(--accent); }
+.rev-row.previewing { border-color: #00e5ff; background: rgba(0,229,255,.07); }
+.rev-head { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
+.rev-time { margin-left: auto; color: var(--muted); font-size: 10.5px; }
+.rev-sub { color: var(--muted); font-size: 11.5px; margin: 4px 0 2px; }
+.rev-tag {
+  font-size: 10.5px; padding: 1px 7px; border-radius: 10px; font-weight: 600;
+  border: 1px solid var(--line); color: var(--muted);
+}
+.rev-tag.now { color: var(--accent); border-color: var(--accent); }
+.rev-tag.restore { color: #b39ddb; border-color: #6a4fa0; }
+.rev-tag.kind-baseline { color: #8fb2ff; border-color: #3a5f93; }
+.rev-tag.kind-calibration { color: #00e5ff; border-color: #146a72; }
+.rev-tag.kind-contours { color: #7ed321; border-color: #3f5f1c; }
+.rev-tag.kind-fields { color: var(--warn); border-color: #6b5016; }
+.rev-tag.kind-migrate { color: #ff9f1c; border-color: #7a5214; }
+.rev-btns { margin: 6px 0 0; }
+
+.rev-preview {
+  border: 1px solid #00e5ff; border-radius: 8px;
+  background: rgba(0,229,255,.05); padding: 10px 12px; margin-top: 10px;
+}
+.rev-banner {
+  display: flex; flex-direction: column;
+  border-bottom: 1px dashed var(--line); padding-bottom: 6px; margin-bottom: 6px;
+}
+.rev-subhead { font-size: 12px; color: var(--accent); margin: 10px 0 4px; }
+.rev-preview table.measure { margin: 4px 0; }
+.rev-warn {
+  color: #ffe2b0; font-size: 12px; border: 1px solid var(--warn);
+  background: rgba(245,166,35,.10); border-radius: 6px; padding: 6px 9px; margin: 6px 0;
+}

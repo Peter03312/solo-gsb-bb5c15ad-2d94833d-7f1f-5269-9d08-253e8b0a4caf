@@ -10,7 +10,10 @@
 对已发布报告还可基于**同一切片的当前草稿**发起**更正**：生成新的不可变报告与图片快照、
 记录更正原因并串成**更正链**，列表展示每条链的当前有效报告、原因与历史，历史报告按原标识永久可查；
 还可在报告详情输入**间距阈值（μm，允许 0）**做**细胞接触簇分析**：按冻结轮廓与定标计算
-细胞两两**净区域最短间距**、阈值内邻居与**连通簇**，并在报告快照上**高亮**所选簇。
+细胞两两**净区域最短间距**、阈值内邻居与**连通簇**，并在报告快照上**高亮**所选簇；
+切片编辑页还提供**草稿修订时间线**：可预览任一历史修订的标尺、细胞轮廓与取样视野，
+并携带当前草稿版本把该修订**恢复**为当前草稿（生成新版本与新修订、不抹掉后来历史、
+按恢复的标尺重算测量与视野统计；已发布报告与更正链不受影响）。
 
 - 技术栈：Node.js（Express）+ SQLite（better-sqlite3）+ 原生 Canvas 前端
 - 图片与数据**全部本地保存**（无任何外部服务依赖）：
@@ -123,12 +126,32 @@
     - **没有邻接关系时每个细胞各自成独立簇**；
     - 分析**只读**：阈值仅影响本次查询，**不写回报告**；草稿后续修改或报告更正都
       **不改变**旧报告的分析结果；报告不存在 → 404，阈值为负或非有限数 → 400。
+14. **草稿修订时间线（预览 / 恢复）**：切片编辑页的「⑧ 草稿修订时间线」按版本由新到旧
+    列出每一条修订，可**预览**并把任一修订**恢复**为当前草稿。
+    - 每次成功的**标尺定标、细胞轮廓保存、取样视野保存、细胞迁移**都在**同一事务内**
+      追加一条与写入后草稿**完整一致**的修订（标尺 + 细胞轮廓/测量 + 取样视野 + 版本号）；
+      **新上传草稿**以初始状态作为**基线**，**已有草稿**（旧库）启动时以当前状态补录一条
+      可恢复**基线**；任何**失败请求（400/409/404）都不留记录**、不推进版本；
+    - **预览**：右侧大图只读叠加该修订的**标尺（青色）、细胞轮廓（彩色）与取样视野（黄色）**，
+      面板给出该修订的标尺参数、逐视野统计与逐细胞测量；预览**不改动草稿**，
+      画布进入只读状态，不能在历史快照上绘制；
+    - **恢复**：必须携带**读取时的当前草稿版本号**（不是被恢复修订的版本）；
+      版本过期 → **HTTP 409** 并返回 `currentVersion`；修订**不存在或不属于该切片**
+      → **HTTP 404**，均**不写入**；
+    - 成功恢复（**201**）：把该修订的标尺/细胞/视野写回草稿，**版本 +1 并生成一条
+      `restore` 新修订**（记录来源修订），**后来的修订历史一条都不删除**；
+      全部细胞测量与视野统计**按恢复出来的标尺重算**；**已发布报告与更正链完全不受影响**；
+    - **发布本身不产生草稿修订**（草稿内容不变，只推进版本号）；
+      恢复后仍可照常编辑、发布或发起更正；
+    - 页面在恢复会**丢弃未保存绘制**（轮廓/视野有未保存修改）时于确认弹窗中明确警示；
+      修订与既有乐观版本号机制共用同一草稿版本。
 
 ## 配置项
 
-本轮（细胞接触簇分析）**未引入新的环境变量、外部依赖或表结构变更**：分析为只读实时计算，
-不写库。此前各轮的幂等迁移（`fields`、`corrects_report_id`、`correction_reason` 列）
-在旧数据库启动时自动完成、无需手工变更。沿用既有配置：
+本轮（草稿修订时间线）新增一张 `image_revisions` 表与两个索引（启动时自动幂等建表，
+旧库无破坏），**未引入新的环境变量或外部依赖**。已有草稿在首次启动时自动补录一条基线修订；
+分析、比较等既有只读能力与配置均保持不变。此前各轮的幂等迁移（`fields`、
+`corrects_report_id`、`correction_reason` 列）在旧数据库启动时自动完成、无需手工变更。沿用既有配置：
 
 | 环境变量 | 默认值 | 说明 |
 | --- | --- | --- |
@@ -219,6 +242,14 @@ npm start
     最短净区域间距、以及由邻接关系形成的连通簇；**点击某个簇**即在右侧报告快照上
     **高亮**该簇全部细胞（再点一次该簇或「清除高亮」取消）。结果只读取发布时冻结数据，
     阈值仅影响本次查看，不写回报告。
+14. 需要回看或回退草稿时，在切片编辑页打开「**⑧ 草稿修订时间线**」：每次成功的定标、
+    保存轮廓、保存视野、细胞迁移都在这里按版本由新到旧列出（新草稿另有「基线」）；
+    点某条修订的「**预览**」，右侧大图即以只读方式叠加该修订的**标尺、细胞轮廓与取样视野**，
+    面板同步显示当时的视野统计与细胞测量（预览不改草稿）；点「**恢复为此版本**」（或在预览面板内点恢复），
+    在确认弹窗确认后即把该修订写回当前草稿：生成**新版本与新修订、不删除后来历史**、
+    按该修订标尺重算全部测量与视野统计；若当前有**未保存绘制**，确认弹窗会警示将被丢弃；
+    携带的草稿版本过期时会被拒绝（409）并自动刷新最新草稿与时间线；
+    **已发布报告与更正链不受恢复影响**，之后仍可正常发布或发起更正。
 
 ## 目录结构
 
@@ -228,13 +259,14 @@ npm start
 ├── docker-compose.yml
 ├── package.json
 ├── server/
-│   ├── index.js       # Express API：上传/定标/轮廓/视野/发布/导出/报告比较/细胞迁移/接触簇
+│   ├── index.js       # Express API：上传/定标/轮廓/视野/发布/导出/比较/迁移/接触簇/草稿修订
 │   ├── db.js          # SQLite 表结构与初始化（启动自动建表 + 旧库幂等补列）
 │   ├── geometry.js    # 几何校验、面积/周长、净区域质心（服务端最终校验）
 │   ├── fields.js      # 取样视野：质心归属、mm²/密度统计、未定标“待定标”
 │   ├── merge-stats.js # 多视野几何并集（平面排列精确面积）+ 严格并集内部判定 + 合并统计（服务端/页端共用 UMD）
 │   ├── compare.js     # 报告比较：手动一对一配对校验、冻结值差值/变化率视图
 │   ├── corrections.js # 报告更正链：原因校验、链构建/追溯摘要、发布校验与乐观冲突判定
+│   ├── revisions.js   # 草稿修订时间线：修订快照写入/水合/概览、旧库基线补录、恢复来源标记
 │   ├── transfer.js    # 细胞迁移：三点对应点校验、仿射求解、整批映射+逐细胞校验
 │   ├── clusters.js    # 接触簇：阈值校验、净区域最短间距（含孔洞语义）、邻接对与连通簇
 │   ├── render.js      # sharp + SVG 渲染标注 PNG
@@ -249,6 +281,7 @@ npm start
 ├── test-correct-api.js # 报告更正链端到端 HTTP 自测（npm test，临时目录起服务）
 ├── test-clusters.js   # 接触簇纯逻辑自测（npm test）
 ├── test-contacts-api.js # 接触簇端到端 HTTP 自测（npm test，临时目录起服务）
+├── test-revisions-api.js # 草稿修订时间线/恢复端到端 HTTP 自测（npm test，临时目录起服务）
 └── data/              # 运行后生成：app.db、images/、snapshots/
 ```
 
@@ -798,6 +831,129 @@ async function contactClusters(reportId, thresholdUm) {
 await contactClusters(process.env.RID, 5);
 ```
 
+## 草稿修订时间线 HTTP 接口（预览 / 乐观恢复）
+
+切片编辑页为每份草稿保留一条**修订时间线**：每次成功的**定标 / 轮廓保存 / 视野保存 /
+细胞迁移**都在同一事务内追加一条与写入后草稿完整一致的修订；新上传草稿以初始状态为
+**基线**（`baseline`），旧库已有草稿在启动时补录一条基线。**发布不产生草稿修订**。
+失败请求（400/409/404）不留任何修订、不推进版本。
+
+| 方法与路径 | 说明 |
+| --- | --- |
+| `GET /api/images/:id/revisions` | 修订时间线概览（不含几何），按版本由新到旧；草稿不存在 → 404 |
+| `GET /api/images/:id/revisions/:revId` | 修订详情：完整快照 `calib`/`cells`/`fields` 与按当时标尺现算的 `fieldStats`，供预览 |
+| `POST /api/images/:id/revisions/:revId/restore` | 恢复该修订为当前草稿；请求体 `{ "version": <读取时的**当前草稿版本**> }` |
+
+修订类型 `kind`：`baseline`（基线）、`calibration`（定标）、`contours`（轮廓保存）、
+`fields`（视野保存）、`migrate`（细胞迁移）、`restore`（恢复；`restoredFromRevisionId`
+指向被恢复修订）。
+
+错误语义（详情与恢复一致）：
+
+- 草稿不存在 → **404** `{error}`；
+- 修订不存在、或修订**不属于该切片**（来自另一张图片）→ **404** `{ "error": "修订不存在或不属于该切片" }`；
+- 恢复缺少 / 非整数 `version` → **400**；
+- 恢复携带的草稿版本过期 → **409** `{error, currentVersion}`，**不写入**；
+
+成功恢复 **201**：把该修订的标尺/细胞/视野写回草稿，`version + 1` 并追加一条 `restore`
+新修订，**后来的修订历史保留**；全部测量与视野统计**按恢复的标尺重算**；
+已发布报告与更正链不受影响。
+
+`GET …/revisions` 响应示例：
+
+```json
+{
+  "imageId": "7ca3…", "currentVersion": 6, "count": 5,
+  "revisions": [
+    { "id": "rev-uuid", "imageId": "7ca3…", "version": 6,
+      "kind": "calibration", "kindLabel": "标尺定标",
+      "restoredFromRevisionId": null,
+      "calibrated": true, "scaleUmPerPx": 2,
+      "cellCount": 1, "cellHoleCount": 0, "fieldCount": 1,
+      "isCurrent": true, "createdAt": "2026-10-02 09:12:30" },
+    { "id": "…", "version": 1, "kind": "baseline", "kindLabel": "基线",
+      "calibrated": false, "scaleUmPerPx": null,
+      "cellCount": 0, "cellHoleCount": 0, "fieldCount": 0,
+      "isCurrent": false, "createdAt": "…" }
+  ]
+}
+```
+
+`GET …/revisions/:revId` 在概览字段之外另含完整内容（结构与 `GET /api/images/:id`
+一致）：`width`、`height`、`calib`（`{p1,p2,distanceUm,scale}` 或 `null`）、
+`cells`（`[{id,name,outer,holes,areaUm2,perimeterUm}]`，测量为该修订当时冻结值）、
+`fields`、以及按当时标尺现算的 `fieldStats`、`isCurrent`。
+
+curl 示例（`IMG` 为切片草稿）：
+
+```bash
+# 1) 时间线（概览，按版本倒序），取想恢复的修订 id
+curl -s http://localhost:8080/api/images/$IMG/revisions | jq -r '
+  .currentVersion as $cur | .revisions[] |
+  "v\(.version) \(.kindLabel)\(if .isCurrent then "（当前）" else "" end) \(.id)"'
+
+# 2) 预览某条修订：标尺、细胞（含测量）、视野与现算视野统计
+curl -s http://localhost:8080/api/images/$IMG/revisions/$REV | jq '{
+  version, kindLabel, scale: .calib.scale,
+  cells: [.cells[] | {name, areaUm2, perimeterUm}],
+  fieldStats: [.fieldStats[] | {name, cellCount, areaMm2, densityPerMm2}] }'
+
+# 3) 恢复：version 必须是读取时的【当前草稿版本】（GET /api/images/$IMG 的 version）
+CUR=$(curl -s http://localhost:8080/api/images/$IMG | jq .version)
+curl -s -X POST http://localhost:8080/api/images/$IMG/revisions/$REV/restore \
+  -H 'Content-Type: application/json' \
+  -d "{\"version\":$CUR}" \
+  | jq '{newVersion: .image.version, restoredFromVersion,
+         scale: .image.calib.scale, cells: .image.cells.length,
+         revision: .revision.kind}'
+
+# 版本过期 → 409 + 当前版本；修订不存在/跨切片 → 404
+curl -s -X POST http://localhost:8080/api/images/$IMG/revisions/$REV/restore \
+  -H 'Content-Type: application/json' -d '{"version":999}'
+# -> { "error": "恢复被拒绝：草稿已过期（携带版本 999，当前版本 6）……", "currentVersion": 6 }
+```
+
+Node.js 示例（无第三方依赖；含 409 自动取最新版本后重试）：
+
+```js
+const base = 'http://localhost:8080';
+const j = (p, init) => fetch(base + p, init).then(async (r) => {
+  const b = await r.json().catch(() => ({}));
+  if (!r.ok) { const e = new Error(b.error || `HTTP ${r.status}`); e.status = r.status; e.body = b; throw e; }
+  return b;
+});
+
+async function restoreRevision(imageId, revisionId) {
+  // version 取“读取时的当前草稿版本”，而不是被恢复修订的版本
+  const draft = await j(`/api/images/${imageId}`);
+  try {
+    const res = await j(`/api/images/${imageId}/revisions/${revisionId}/restore`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ version: draft.version })
+    });
+    console.log(`已恢复 v${res.restoredFromVersion} → 新草稿 v${res.image.version}（新修订 ${res.revision.kind}）` +
+                `；标尺 1px=${res.image.calib.scale}μm，细胞 ${res.image.cells.length} 个，视野统计已重算`);
+    return res;
+  } catch (e) {
+    if (e.status === 409) {
+      // 期间草稿被改动：用返回的 currentVersion 重新确认后再恢复（历史不会被抹掉）
+      console.error(`版本过期，当前 v${e.body.currentVersion}，请重新确认后重试`);
+    }
+    throw e; // 404：修订不存在或不属于该切片；400：缺少版本号
+  }
+}
+
+// 预览（只读，不写库）
+const preview = await j(`/api/images/${process.env.IMG}/revisions/${process.env.REV}`);
+console.log(`预览 v${preview.version}（${preview.kindLabel}）：`,
+  `标尺`, preview.calib && preview.calib.scale,
+  `细胞`, preview.cells.map((c) => `${c.name}=${c.areaUm2}μm²`),
+  `视野统计`, preview.fieldStats.map((s) => `${s.name}:${s.cellCount}个`));
+
+await restoreRevision(process.env.IMG, process.env.REV);
+```
+
 ## 报告比较 HTTP 接口
 
 | 方法与路径 | 说明 |
@@ -822,6 +978,9 @@ await contactClusters(process.env.RID, 5);
 | `POST /api/images/:id/publish` | 发布冻结（含视野与统计；带 `version`，过期 409） |
 | **`POST /api/images/:id/migrate/preview`** | **迁移预览：三点对应仿射映射 + 逐细胞校验（不写入；返回预览时目标草稿版本）** |
 | **`POST /api/images/:id/migrate`** | **确认迁移（带预览时版本，过期 409；任一校验失败 400 整批不写入）** |
+| **`GET /api/images/:id/revisions`** | **草稿修订时间线概览（按版本倒序，不含几何；含当前标记与类型/计数）** |
+| **`GET /api/images/:id/revisions/:revId`** | **修订详情：完整标尺/细胞/视野快照 + 现算视野统计（预览，只读）；不存在或跨切片 404** |
+| **`POST /api/images/:id/revisions/:revId/restore`** | **恢复修订为当前草稿：携带当前草稿版本，过期 409、不存在/跨切片 404；成功 201 生成新版本与新修订、不抹历史、按恢复标尺重算** |
 | `GET /api/reports` / `GET /api/reports/:id` | 报告列表 / 冻结详情（含 `correctsReportId`、`correctionReason`、`chainId`、`isChainTip`） |
 | **`GET /api/report-chains`** | **更正链列表：每条链的当前有效报告、最近更正原因与历史** |
 | **`GET /api/reports/:id/trace`** | **追溯某份报告所在更正链（根、末端、位置、由旧到新 members）** |

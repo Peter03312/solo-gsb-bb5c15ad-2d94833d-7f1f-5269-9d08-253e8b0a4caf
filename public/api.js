@@ -67,6 +67,22 @@ const API = {
       body: JSON.stringify({ version, title })
     }));
   },
+  // 草稿修订时间线：概览列表（不含几何），按版本由新到旧
+  async listRevisions(id) {
+    return jsonOrThrow(await fetch(`/api/images/${id}/revisions`));
+  },
+  // 修订详情：完整快照（标尺/细胞/视野）+ 按当时标尺现算的视野统计，供预览
+  async getRevision(id, revisionId) {
+    return jsonOrThrow(await fetch(`/api/images/${id}/revisions/${revisionId}`));
+  },
+  // 恢复修订为当前草稿：携带读取时的【当前草稿版本】
+  async restoreRevision(id, revisionId, version) {
+    return jsonOrThrow(await fetch(`/api/images/${id}/revisions/${revisionId}/restore`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ version })
+    }));
+  },
   // 多视野合并统计：草稿按当前数据实时计算（只读）
   async mergeDraftFields(id, fieldIds) {
     return jsonOrThrow(await fetch(`/api/images/${id}/field-merge`, {

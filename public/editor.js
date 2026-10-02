@@ -41,6 +41,8 @@ const Editor = {
   tool: 'cell',
   migrate: null,       // 细胞迁移工作状态（见 resetMigration）
   mergeSelected: null, // 多视野合并统计勾选的视野 id（按 this.fields 顺序）
+  revisions: null,     // 草稿修订时间线概览（由新到旧）；null 表示尚未加载
+  previewRev: null,    // 正在预览的修订详情（完整快照）；null 表示编辑当前草稿
 
   async open(id) {
     this.imageId = id;
@@ -50,6 +52,8 @@ const Editor = {
     await this.applyServerData(data);
     this.mergeSelected = [];
     this.resetMigration();
+    this.previewRev = null;
+    this.loadRevisions();
     this.loadMigrateReports();
 
     if (!this.view) {
@@ -62,18 +66,23 @@ const Editor = {
           document.getElementById('zoom-indicator').textContent = `${Math.round(k * 100)}%`;
         }
       });
-      this.view.bindState(() => ({
-        cells: this.cells,
-        fields: this.fields,
-        drawing: this.drawing,
-        activeCellId: this.activeCellId,
-        activeFieldId: this.activeFieldId,
-        calib: this.img ? this.img.calib : null,
-        calibDraft: this.calibDraft,
-        migrationTargetPoints: this.migrate ? this.migrate.targetPoints : [],
-        migrationPreview: this.migrate && this.migrate.preview ? this.migrate.preview.cells : null
-      }));
+      this.view.bindState(() => {
+        // 预览修订时画布展示该修订的标尺/轮廓/视野并整体只读；否则展示当前工作副本
+        const rev = this.previewRev;
+        return {
+          cells: rev ? rev.cells : this.cells,
+          fields: rev ? rev.fields : this.fields,
+          drawing: rev ? null : this.drawing,
+          activeCellId: rev ? null : this.activeCellId,
+          activeFieldId: rev ? null : this.activeFieldId,
+          calib: rev ? rev.calib : (this.img ? this.img.calib : null),
+          calibDraft: rev ? null : this.calibDraft,
+          migrationTargetPoints: !rev && this.migrate ? this.migrate.targetPoints : [],
+          migrationPreview: !rev && this.migrate && this.migrate.preview ? this.migrate.preview.cells : null
+        };
+      });
     }
+    this.setPreviewReadOnly();
     await this.view.loadImage(`/api/images/${id}/file`, data.width, data.height);
     this.setTool('cell');
     this.renderSidebar();
@@ -115,17 +124,20 @@ const Editor = {
   // ---------- 工具与绘制 ----------
 
   setTool(t) {
+    // 修订预览中画布只读：强制停留平移工具，避免在历史快照上绘制
+    if (this.previewRev) t = 'pan';
     this.tool = t;
     for (const id of ['tool-calib', 'tool-cell', 'tool-hole', 'tool-field', 'tool-fieldhole', 'tool-pan', 'tool-migrate']) {
       const el = document.getElementById(id);
       if (el) el.classList.toggle('active', id === `tool-${t}`);
     }
-    document.getElementById('tool-hole').disabled = !this.activeCellId;
-    document.getElementById('tool-fieldhole').disabled = !this.activeFieldId;
+    document.getElementById('tool-hole').disabled = !this.activeCellId || !!this.previewRev;
+    document.getElementById('tool-fieldhole').disabled = !this.activeFieldId || !!this.previewRev;
     if (this.view) this.view.setTool(t);
   },
 
   addPoint(pt) {
+    if (this.previewRev) return;
     if (!this.drawing) {
       if (this.tool === 'hole') {
         if (!this.activeCellId) return this.toast('请先在细胞列表中选中一个细胞');
@@ -258,6 +270,7 @@ const Editor = {
   // ---------- 定标 ----------
 
   addCalibPoint(pt) {
+    if (this.previewRev) return;
     if (!this.calibDraft) {
       this.calibDraft = [pt];
     } else {
@@ -282,6 +295,7 @@ const Editor = {
   },
 
   async saveCalibration(p1, p2, distanceUm) {
+    if (this.previewRev) return this.toast('正在预览历史修订：请先「退出预览」再定标');
     try {
       const updated = await API.saveCalibration(this.imageId, this.img.version, p1, p2, distanceUm);
       // 保留本地未保存的几何草稿，按新比例重算其测量值
@@ -293,6 +307,7 @@ const Editor = {
       this.toast(`定标成功：1 px = ${updated.calib.scale.toFixed(6)} μm，全部草稿测量已按新比例重算`, true);
       this.renderSidebar();
       this.view.render();
+      this.loadRevisions();
     } catch (e) {
       this.calibDraft = null;
       if (e.status === 409) return this.handleConflict(e);
@@ -303,6 +318,7 @@ const Editor = {
   // ---------- 保存轮廓（整批原子） ----------
 
   async saveAll() {
+    if (this.previewRev) return this.toast('正在预览历史修订：请先「退出预览」再保存轮廓');
     if (!this.cells.length) return this.toast('还没有任何细胞轮廓');
     const err = window.ClientGeom.clientValidate(this.cells, this.img.width, this.img.height);
     if (err) return this.toast(err);
@@ -313,6 +329,7 @@ const Editor = {
       await this.applyServerData(updated, false, true);
       this.renderSidebar();
       this.toast('轮廓已保存，测量值与视野细胞密度已按当前轮廓与标尺重算', true);
+      this.loadRevisions();
     } catch (e) {
       if (e.status === 409) return this.handleConflict(e);
       this.toast(e.message);
@@ -322,6 +339,7 @@ const Editor = {
   // ---------- 保存视野（整批原子；与轮廓/定标共用同一草稿版本） ----------
 
   async saveFields() {
+    if (this.previewRev) return this.toast('正在预览历史修订：请先「退出预览」再保存视野');
     if (!this.fields.length) return this.toast('还没有任何取样视野');
     const err = window.ClientGeom.clientValidateFields(this.fields, this.img.width, this.img.height);
     if (err) return this.toast(err);
@@ -332,6 +350,7 @@ const Editor = {
       await this.applyServerData(updated, true, false);
       this.renderSidebar();
       this.toast('视野已保存，细胞密度统计已按当前轮廓与标尺计算', true);
+      this.loadRevisions();
     } catch (e) {
       if (e.status === 409) return this.handleConflict(e);
       this.toast(e.message);
@@ -486,6 +505,7 @@ const Editor = {
 
   addMigrateTargetPoint(pt) {
     const m = this.migrate;
+    if (this.previewRev) return;
     if (!m || !m.reportId) return this.toast('请先在「⑥ 细胞迁移」面板选择来源报告');
     if (m.targetPoints.length >= 3) {
       return this.toast('目标对应点已满 3 个；如需重标请点击「清除全部对应点」');
@@ -511,6 +531,7 @@ const Editor = {
   async previewMigration() {
     const m = this.migrate;
     if (!m || !m.reportId) return;
+    if (this.previewRev) return this.toast('正在预览历史修订：请先「退出预览」再使用细胞迁移');
     try {
       const resp = await API.previewMigration(this.imageId, {
         reportId: m.reportId,
@@ -535,6 +556,7 @@ const Editor = {
   async confirmMigration() {
     const m = this.migrate;
     if (!m || !m.preview || !m.preview.ok) return;
+    if (this.previewRev) return this.toast('正在预览历史修订：请先「退出预览」再迁移');
     if (this.dirty || this.fieldsDirty) {
       return this.toast('有未保存的轮廓/视野修改：请先保存（保存会使预览版本过期，需重新预览）再确认迁移');
     }
@@ -550,6 +572,7 @@ const Editor = {
       this.resetMigration();
       this.loadMigrateReports();
       this.renderSidebar();
+      this.loadRevisions();
       this.toast(`迁移完成：已追加 ${resp.appendedCount} 个细胞（保留名称、按当前标尺重算测量与视野统计），草稿版本 v${resp.image.version}`, true);
     } catch (e) {
       if (e.status === 409) {
@@ -602,6 +625,233 @@ const Editor = {
              : `${p.failCount} 个细胞映射后不满足几何规则，已禁止提交`}</div>` + rows;
   },
 
+  // ---------- 草稿修订时间线（预览 / 恢复） ----------
+
+  async loadRevisions() {
+    const el = document.getElementById('revision-list');
+    try {
+      this.revisions = await API.listRevisions(this.imageId);
+    } catch (e) {
+      if (el) el.innerHTML = `<p class="muted">修订时间线加载失败：${e.message}</p>`;
+      return;
+    }
+    this.renderRevisionList();
+  },
+
+  renderRevisionList() {
+    const el = document.getElementById('revision-list');
+    if (!el) return;
+    if (!this.revisions) { el.innerHTML = '<p class="muted">加载中…</p>'; return; }
+    const list = this.revisions.revisions || [];
+    if (!list.length) {
+      el.innerHTML = '<p class="muted">还没有修订。成功的定标、轮廓保存、视野保存与细胞迁移会记录在这里。</p>';
+      return;
+    }
+    // 只重绘列表行，保留正在展示的预览面板（#revision-preview）
+    el.innerHTML = '';
+    list.forEach((r) => {
+      const row = document.createElement('div');
+      row.className = 'rev-row' + (r.isCurrent ? ' current' : '');
+      if (this.previewRev && this.previewRev.id === r.id) row.classList.add('previewing');
+
+      const head = document.createElement('div');
+      head.className = 'rev-head';
+      const tags = `<span class="rev-tag kind-${r.kind}">${r.kindLabel}</span>` +
+        `<span class="rev-tag">v${r.version}</span>` +
+        (r.isCurrent ? '<span class="rev-tag now">当前</span>' : '') +
+        (r.kind === 'restore' ? '<span class="rev-tag restore">↩ 恢复</span>' : '');
+      head.innerHTML = `${tags}<span class="rev-time">${r.createdAt}</span>`;
+      row.appendChild(head);
+
+      const sub = document.createElement('div');
+      sub.className = 'rev-sub';
+      const scaleTxt = r.calibrated
+        ? `1 px = ${Number(r.scaleUmPerPx).toFixed(4)} μm`
+        : '<span style="color:var(--warn)">未定标</span>';
+      sub.innerHTML = `细胞 ${r.cellCount}（孔洞 ${r.cellHoleCount}） · 视野 ${r.fieldCount} · ${scaleTxt}`;
+      row.appendChild(sub);
+
+      const btns = document.createElement('div');
+      btns.className = 'toolbar wrap rev-btns';
+      const pv = document.createElement('button');
+      pv.className = 'small';
+      pv.textContent = (this.previewRev && this.previewRev.id === r.id) ? '正在预览' : '预览';
+      pv.disabled = !!(this.previewRev && this.previewRev.id === r.id);
+      pv.onclick = () => this.previewRevision(r.id);
+      btns.appendChild(pv);
+
+      const rs = document.createElement('button');
+      rs.className = 'small primary';
+      rs.textContent = '恢复为此版本';
+      rs.disabled = !!r.isCurrent || !!this.previewRev;
+      rs.title = r.isCurrent ? '该修订就是当前草稿' : (this.previewRev ? '请先退出当前预览' : '');
+      rs.onclick = () => this.restoreRevision(r);
+      btns.appendChild(rs);
+      row.appendChild(btns);
+
+      el.appendChild(row);
+    });
+  },
+
+  // 预览不改动任何草稿数据，只把画布与预览面板切到该修订的快照（只读）
+  async previewRevision(revisionId) {
+    try {
+      const detail = await API.getRevision(this.imageId, revisionId);
+      this.previewRev = detail;
+      this.drawing = null;
+      this.calibDraft = null;
+      this.setPreviewReadOnly();
+      this.setTool('pan');
+      this.renderRevisionPanel(detail);
+      this.renderRevisionList();
+      if (this.view) this.view.render();
+      this.toast(`正在预览 v${detail.version}（${detail.kindLabel}）：仅查看，未改动草稿；退出预览返回当前草稿`);
+    } catch (e) {
+      this.toast(e.message);
+    }
+  },
+
+  exitPreview() {
+    if (!this.previewRev) return;
+    this.previewRev = null;
+    this.setPreviewReadOnly();
+    this.renderRevisionPanel(null);
+    this.renderRevisionList();
+    this.setTool('pan');
+    if (this.view) this.view.render();
+  },
+
+  setPreviewReadOnly() {
+    if (this.view) this.view.readOnly = !!this.previewRev;
+  },
+
+  // 预览面板：该修订的标尺信息、视野统计、逐细胞测量；几何本身画在右侧大画布上
+  renderRevisionPanel(detail) {
+    const wrap = document.getElementById('revision-preview');
+    if (!wrap) return;
+    if (!detail) { wrap.classList.add('hidden'); wrap.innerHTML = ''; return; }
+    wrap.classList.remove('hidden');
+
+    const c = detail.calib;
+    const calibHtml = c
+      ? `<span class="ok">已定标</span>：p1(${c.p1.x.toFixed(1)}, ${c.p1.y.toFixed(1)})，` +
+        `p2(${c.p2.x.toFixed(1)}, ${c.p2.y.toFixed(1)})；<b>${c.distanceUm} μm</b>，` +
+        `<b>1 px = ${c.scale.toFixed(6)} μm</b>`
+      : '<span class="err">未定标</span>';
+
+    let fieldHtml;
+    if (!detail.fields.length) {
+      fieldHtml = '<p class="hint">该修订没有取样视野。</p>';
+    } else {
+      const rows = (detail.fieldStats || []).map((s) => `
+        <tr>
+          <td>${s.name}</td><td>${s.holes}</td>
+          <td>${s.areaText}</td><td>${s.cellCount}</td>
+          <td>${s.densityText}</td><td>${s.countedCellAreaText}</td>
+        </tr>`).join('');
+      fieldHtml = `
+        <table class="measure compact">
+          <thead><tr>
+            <th>视野</th><th>孔洞</th><th>净面积 mm²</th><th>细胞数</th>
+            <th>密度 个/mm²</th><th>计入净面积 mm²</th>
+          </tr></thead>
+          <tbody>${rows}</tbody>
+        </table>`;
+    }
+
+    let measureHtml;
+    if (!c) {
+      measureHtml = '<p class="hint">该修订未定标。</p>';
+    } else if (!detail.cells.length) {
+      measureHtml = '<p class="hint">该修订没有细胞轮廓。</p>';
+    } else {
+      const rows = detail.cells.map((cell, i) => `
+        <tr>
+          <td><span style="color:${PALETTE[i % PALETTE.length]}">●</span> ${cell.name || `细胞 ${i + 1}`}</td>
+          <td>${(cell.holes || []).length}</td>
+          <td>${fmt(cell.areaUm2)}</td>
+          <td>${fmt(cell.perimeterUm)}</td>
+        </tr>`).join('');
+      measureHtml = `
+        <table class="measure compact">
+          <thead><tr><th>细胞</th><th>孔洞</th><th>净面积 μm²</th><th>总周长 μm</th></tr></thead>
+          <tbody>${rows}</tbody>
+        </table>`;
+    }
+
+    const restoreHint = (this.dirty || this.fieldsDirty)
+      ? '<p class="rev-warn">当前存在<b>未保存</b>的轮廓/视野绘制：恢复会丢弃这些未保存内容。</p>'
+      : '';
+
+    wrap.innerHTML = `
+      <div class="rev-banner">
+        <div>预览中：<b>v${detail.version} · ${detail.kindLabel}</b>
+          <span class="muted">（${detail.createdAt}）</span></div>
+        <div class="toolbar" style="margin:6px 0 0">
+          <button id="rev-exit" class="small">退出预览</button>
+          <button id="rev-restore" class="small primary" ${detail.isCurrent ? 'disabled' : ''}>
+            ${detail.isCurrent ? '即当前草稿' : '恢复为此版本'}
+          </button>
+        </div>
+      </div>
+      <div class="info">${calibHtml}</div>
+      ${restoreHint}
+      <h4 class="rev-subhead">取样视野（${detail.fields.length}）</h4>
+      ${fieldHtml}
+      <h4 class="rev-subhead">细胞测量（${detail.cells.length}）</h4>
+      ${measureHtml}
+      <p class="hint">右图叠加该修订的<b>标尺（青色）、细胞轮廓（彩色）与取样视野（黄色）</b>，
+        仅用于查看。恢复会把该修订写回当前草稿并生成新版本，不抹掉后来的历史。</p>`;
+
+    document.getElementById('rev-exit').onclick = () => this.exitPreview();
+    const restoreBtn = document.getElementById('rev-restore');
+    if (restoreBtn && !detail.isCurrent) {
+      restoreBtn.onclick = () => this.restoreRevision({
+        id: detail.id, version: detail.version, kindLabel: detail.kindLabel
+      });
+    }
+  },
+
+  // 恢复：携带【读取时的当前草稿版本】（this.img.version），不是被预览修订的版本
+  async restoreRevision(revSummary) {
+    const hasUnsaved = this.dirty || this.fieldsDirty;
+    const msg =
+      `确定把 v${revSummary.version}（${revSummary.kindLabel}）恢复为当前草稿吗？\n\n` +
+      '· 将生成新的草稿版本与新修订，之后的修订历史不会被删除；\n' +
+      '· 全部测量与视野统计按该修订的标尺重算；\n' +
+      '· 已发布报告与更正链不受影响。' +
+      (hasUnsaved ? '\n\n⚠ 当前有未保存的轮廓/视野绘制，恢复会丢弃这些未保存内容！' : '');
+    if (!window.confirm(msg)) return;
+
+    try {
+      const resp = await API.restoreRevision(this.imageId, revSummary.id, this.img.version);
+      await this.applyServerData(resp.image);
+      this.previewRev = null;
+      this.setPreviewReadOnly();
+      this.resetMigration();
+      this.loadMigrateReports();
+      this.renderRevisionPanel(null);
+      this.setTool('pan');
+      this.renderSidebar();
+      await this.loadRevisions();
+      this.toast(
+        `已恢复 v${resp.restoredFromVersion} 为当前草稿（新版本 v${resp.image.version}）：` +
+        '测量与视野统计已按该修订标尺重算；后来的修订历史保留，已发布报告不受影响', true);
+    } catch (e) {
+      if (e.status === 409) {
+        this.toast(e.message);
+        try {
+          const fresh = await API.getImage(this.imageId);
+          await this.applyServerData(fresh);
+          this.renderSidebar();
+        } catch (_) { /* ignore */ }
+        await this.loadRevisions();
+        return;
+      }
+      this.toast(e.message);
+    }
+  },
+
   async handleConflict(e) {
     this.toast(`${e.message} 正在加载最新草稿…`);
     try {
@@ -614,6 +864,7 @@ const Editor = {
   // ---------- 发布 ----------
 
   async publish() {
+    if (this.previewRev) return this.toast('正在预览历史修订：请先「退出预览」再发布');
     if (!this.img.calib) return this.toast('请先完成标尺定标');
     if (!this.cells.length) return this.toast('请至少圈出一个细胞外轮廓');
     if (this.dirty) return this.toast('有未保存的轮廓修改，请先点击「保存全部轮廓」再发布');
@@ -625,6 +876,8 @@ const Editor = {
       this.img = await API.getImage(this.imageId);
       this.dirty = false;
       this.renderSidebar();
+      // 发布会推进草稿版本但不产生修订；刷新时间线以更新「当前」标记
+      this.loadRevisions();
       this.toast(`报告已发布并冻结（草稿版本 v${report.draftVersion}）。可在「已发布报告」中查看与导出。`, true);
     } catch (e) {
       if (e.status === 409) return this.handleConflict(e);
@@ -706,7 +959,8 @@ const Editor = {
   renderSidebar() {
     document.getElementById('ed-title').textContent = this.img.filename;
     const dirtyTxt = (this.dirty ? ' · 轮廓有未保存修改' : '') + (this.fieldsDirty ? ' · 视野有未保存修改' : '');
-    document.getElementById('ed-version').textContent = `草稿 v${this.img.version}${dirtyTxt}`;
+    const previewTxt = this.previewRev ? ` · 🔎 预览 v${this.previewRev.version}` : '';
+    document.getElementById('ed-version').textContent = `草稿 v${this.img.version}${dirtyTxt}${previewTxt}`;
 
     // 定标信息
     const c = this.img.calib;
@@ -880,13 +1134,20 @@ const Editor = {
         ${this.dirty ? '<p class="hint">* 为未保存的实时计算值；保存后以服务端结果为准。缩放/平移不改变数值。</p>' : ''}`;
     }
 
-    document.getElementById('save-contours').disabled = !this.dirty;
-    document.getElementById('save-fields').disabled = !this.fieldsDirty;
-    document.getElementById('tool-hole').disabled = !this.activeCellId;
-    document.getElementById('tool-fieldhole').disabled = !this.activeFieldId;
+    const pv = !!this.previewRev;
+    document.getElementById('save-contours').disabled = !this.dirty || pv;
+    document.getElementById('save-fields').disabled = !this.fieldsDirty || pv;
+    document.getElementById('tool-hole').disabled = !this.activeCellId || pv;
+    document.getElementById('tool-fieldhole').disabled = !this.activeFieldId || pv;
+    document.getElementById('tool-calib').disabled = pv;
+    document.getElementById('tool-cell').disabled = pv;
+    document.getElementById('tool-field').disabled = pv;
+    document.getElementById('tool-migrate').disabled = pv;
+    document.getElementById('publish-btn').disabled = pv;
     this.renderMergePanel(c);
     this.renderMigratePanel();
     this.renderDraftInfo();
+    this.renderRevisionList();
   },
 
   // ---------- 多视野合并统计（草稿实时） ----------
@@ -972,6 +1233,8 @@ const Editor = {
     if (!this.imageId || document.getElementById('view-editor').classList.contains('hidden')) return;
     const tag = (e.target.tagName || '').toLowerCase();
     if (tag === 'input' || tag === 'textarea') return;
+    // 修订预览中画布只读：Enter/Backspace 等绘制快捷键一律不作用于历史快照
+    if (this.previewRev) return;
     if (e.key === 'Escape') {
       if (this.drawing || this.calibDraft) { this.cancelRing(); e.preventDefault(); }
     } else if (e.key === 'Enter' && this.drawing) {
