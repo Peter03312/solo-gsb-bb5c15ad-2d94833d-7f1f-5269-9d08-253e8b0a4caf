@@ -5,6 +5,29 @@
 const App = {
   views: ['view-home', 'view-editor', 'view-reports', 'view-report-detail',
           'view-comparisons', 'view-compare-editor'],
+  _suppressGuard: 0,    // 因拦截而还原 hash 触发的二次路由：跳过守卫（计数，避免竞态）
+  _reentering: null,    // 还原 hash 后重入同一编辑器时跳过 Editor.open
+
+  // 离开切片编辑页（或切换到另一张切片）前，若有未保存绘制必须确认。
+  // 返回 true 表示允许进入新路由；false 表示已拦截并把 hash 还原到编辑页。
+  confirmLeaveEditor(parts) {
+    if (this._suppressGuard > 0) {
+      this._suppressGuard -= 1;
+      return true; // 本次路由是拦截后还原 hash 引起的，放行且不重新加载编辑器
+    }
+    if (!Editor.imageId) return true;
+    const stayingOnSame = parts[0] === 'edit' && parts[1] === Editor.imageId;
+    if (stayingOnSame) return true;
+    if (!Editor.dirty && !Editor.fieldsDirty) return true;
+    if (confirm('当前切片有未保存的轮廓/视野绘制，离开本页将丢弃这些未保存修改。确定离开吗？')) {
+      return true;
+    }
+    // 拦截：把 hash 还原为当前编辑页；忽略随之而来的那次 hashchange
+    this._suppressGuard = 1;
+    this._reentering = Editor.imageId;
+    location.hash = `#/edit/${Editor.imageId}`;
+    return false;
+  },
 
   show(id) {
     for (const v of this.views) document.getElementById(v).classList.toggle('hidden', v !== id);
@@ -69,10 +92,17 @@ const App = {
     const parts = hash.replace(/^#\/?/, '').split('/');
     const page = parts[0] || '';
 
+    // 离开有未保存绘制的编辑器前必须确认；被拦截则什么都不做（hash 已还原）
+    if (!this.confirmLeaveEditor(parts)) return;
+
     if (page === 'edit' && parts[1]) {
       this.show('view-editor');
       window.scrollTo(0, 0);
       try {
+        // 守卫拦截后还原 hash 重入同一编辑器：保留现场，不重新拉取/覆盖未保存绘制
+        const reenterId = this._reentering;
+        this._reentering = null;
+        if (reenterId === parts[1]) return;
         await Editor.open(parts[1]);
       } catch (e) {
         alert(e.message);
@@ -150,6 +180,13 @@ const App = {
     };
 
     window.addEventListener('keydown', (e) => Editor.onKey(e));
+    // 刷新/关闭整页前，若编辑页有未保存绘制，浏览器原生确认丢弃
+    window.addEventListener('beforeunload', (e) => {
+      if (Editor.imageId && (Editor.dirty || Editor.fieldsDirty)) {
+        e.preventDefault();
+        e.returnValue = '';
+      }
+    });
     window.addEventListener('hashchange', () => this.route());
     this.route();
   }

@@ -123,6 +123,25 @@
     - **没有邻接关系时每个细胞各自成独立簇**；
     - 分析**只读**：阈值仅影响本次查询，**不写回报告**；草稿后续修改或报告更正都
       **不改变**旧报告的分析结果；报告不存在 → 404，阈值为负或非有限数 → 400。
+14. **草稿修订时间线与恢复（切片编辑页）**：每次**成功写入**草稿的操作——
+    **标尺定标、轮廓保存、视野保存、细胞迁移确认**——都在同一事务内追加一条
+    **完整一致、只追加不可变的修订**（完整快照当时的标尺、细胞轮廓与取样视野）；
+    上传的切片以空状态建立**基线修订**，修订功能上线前已存在的旧草稿在服务启动时
+    **以当前状态补建一条可恢复基线**（幂等，不重复补建）。**校验失败的请求不留任何记录**。
+    - 编辑页 **⑧ 草稿修订时间线** 面板由新到旧列出全部修订（类型、序号、当时草稿版本、
+      是否定标、细胞/视野数、时间与说明）；
+    - 点 **预览**：右侧画布以**只读**方式叠加该修订的**标尺、细胞轮廓与取样视野**，
+      面板同时给出按**该修订标尺**计算的细胞测量与视野统计；预览不触碰当前草稿与未保存绘制，
+      可随时「退出预览」或在多个修订间切换；
+    - 点 **恢复为当前草稿**：必须携带**读取时的草稿版本号**；期间草稿被改动（版本过期）时
+      返回 **HTTP 409 与当前版本**、页面自动刷新，**修订不存在或不属于该切片**返回 **404**、
+      缺少版本号返回 **400**，任何失败**都不写入**；
+    - 恢复成功会**生成新版本与一条新的 `restore` 修订**（记录来源修订序号），
+      **后来的历史一条都不抹掉**；草稿的标尺/轮廓/视野整体替换为目标快照，并
+      **按恢复的标尺重算全部细胞测量与视野统计**；
+    - 恢复只作用于草稿：**已发布报告与更正链完全不受影响**（发布只推进草稿版本、不产生修订）；
+    - 有**未保存的轮廓/视野绘制**时，恢复会弹出确认；离开编辑页、切换切片或刷新/关闭页面
+      前同样会先提示确认丢弃未保存绘制。
 
 ## 配置项
 
@@ -219,6 +238,14 @@ npm start
     最短净区域间距、以及由邻接关系形成的连通簇；**点击某个簇**即在右侧报告快照上
     **高亮**该簇全部细胞（再点一次该簇或「清除高亮」取消）。结果只读取发布时冻结数据，
     阈值仅影响本次查看，不写回报告。
+14. 需要查看或回到草稿的某个历史状态时，在切片编辑页打开 **⑧ 草稿修订时间线**：
+    - 每次定标、保存轮廓、保存视野、确认迁移成功后都会新增一条修订（失败不留记录）；
+    - 点某条修订的 **预览**：右侧画布只读叠加该修订的标尺、细胞轮廓与取样视野，
+      面板显示按该修订标尺计算的测量与视野统计；再点 **退出预览** 返回当前编辑；
+    - 点 **恢复为当前草稿**（当前内容对应修订的按钮自动禁用）：有未保存绘制时先确认丢弃，
+      确认后携带读取时版本提交；若期间草稿被改动会提示版本过期并自动刷新时间线，
+      重新选择修订后再恢复；成功后草稿版本与时间线新增一条恢复记录、原历史保留，
+      测量与视野统计按恢复的标尺重算，已发布报告与更正链不受影响。
 
 ## 目录结构
 
@@ -228,13 +255,14 @@ npm start
 ├── docker-compose.yml
 ├── package.json
 ├── server/
-│   ├── index.js       # Express API：上传/定标/轮廓/视野/发布/导出/报告比较/细胞迁移/接触簇
+│   ├── index.js       # Express API：上传/定标/轮廓/视野/发布/导出/报告比较/细胞迁移/接触簇/修订时间线与恢复
 │   ├── db.js          # SQLite 表结构与初始化（启动自动建表 + 旧库幂等补列）
 │   ├── geometry.js    # 几何校验、面积/周长、净区域质心（服务端最终校验）
 │   ├── fields.js      # 取样视野：质心归属、mm²/密度统计、未定标“待定标”
 │   ├── merge-stats.js # 多视野几何并集（平面排列精确面积）+ 严格并集内部判定 + 合并统计（服务端/页端共用 UMD）
 │   ├── compare.js     # 报告比较：手动一对一配对校验、冻结值差值/变化率视图
 │   ├── corrections.js # 报告更正链：原因校验、链构建/追溯摘要、发布校验与乐观冲突判定
+│   ├── revisions.js   # 草稿修订时间线：成功写入同事务追加完整快照、旧草稿基线补建、恢复
 │   ├── transfer.js    # 细胞迁移：三点对应点校验、仿射求解、整批映射+逐细胞校验
 │   ├── clusters.js    # 接触簇：阈值校验、净区域最短间距（含孔洞语义）、邻接对与连通簇
 │   ├── render.js      # sharp + SVG 渲染标注 PNG
@@ -249,6 +277,7 @@ npm start
 ├── test-correct-api.js # 报告更正链端到端 HTTP 自测（npm test，临时目录起服务）
 ├── test-clusters.js   # 接触簇纯逻辑自测（npm test）
 ├── test-contacts-api.js # 接触簇端到端 HTTP 自测（npm test，临时目录起服务）
+├── test-revisions-api.js # 草稿修订时间线/恢复端到端 HTTP 自测（npm test，临时目录起服务）
 └── data/              # 运行后生成：app.db、images/、snapshots/
 ```
 
@@ -808,6 +837,66 @@ await contactClusters(process.env.RID, 5);
 | `PUT /api/comparisons/:id` | 修改标题与配对（两侧报告不可更换），须携带读取时 `version`；过期 → 409 并返回 `currentVersion`，整次修改不写入 |
 | `GET /api/comparisons/:id/csv` | 导出与页面一致的比较 CSV（UTF-8 BOM） |
 
+## 草稿修订时间线与恢复 HTTP 接口
+
+每次**成功写入**（定标 / 轮廓 / 视野 / 迁移）都在同一事务追加一条只追加的完整快照修订；
+上传即建空草稿基线，旧库启动时自动以当前状态补建基线。失败请求不留修订。
+
+| 方法与路径 | 说明 |
+| --- | --- |
+| `GET /api/images/:id/revisions` | 时间线（由新到旧）：`{currentVersion, revisions:[{id,seq,type,typeLabel,note,draftVersion,calibrated,cellCount,fieldCount,isRestore,restoredFromId,restoredFromSeq,createdAt,...}]}`；图片不存在 → 404 |
+| `GET /api/images/:id/revisions/:revId` | 修订完整快照（预览）：含 `calib`、`cells`、`fields` 与按**该修订标尺**计算的 `fieldStats`、`isCurrent`；修订不存在或不属于该切片 → 404 |
+| `POST /api/images/:id/revisions/:revId/restore` | 恢复为当前草稿，请求体 `{version}` 必须是读取时的草稿版本；成功 **201** 返回 `{image, revision, restoredFrom}`，生成新版本与新 `restore` 修订，不抹历史 |
+
+恢复的错误约定：
+
+- `version` 缺失或非整数 → **400**；
+- `version` 与当前草稿版本不一致 → **409**，返回 `{error, currentVersion}`，**不写入**；
+- 修订不存在、或不属于该切片 → **404**，**不写入**（不泄露其它切片修订）。
+
+调用示例：
+
+```bash
+IMG=<image_id>
+
+# 1) 查看时间线（由新到旧）：拿到想恢复的修订 id 与当前草稿版本
+curl -s http://localhost:8080/api/images/$IMG/revisions
+# -> { "currentVersion": 4,
+#      "revisions": [
+#        { "seq": 4, "type": "fields",  "typeLabel": "视野保存", "draftVersion": 4, ... },
+#        { "seq": 3, "type": "contours","typeLabel": "轮廓保存", "draftVersion": 3, ... },
+#        { "seq": 2, "type": "calibration", "typeLabel": "标尺定标", "draftVersion": 2, ... },
+#        { "seq": 1, "type": "baseline","typeLabel": "基线", "draftVersion": 1, ... } ] }
+
+# 2) 预览某条修订（标尺/细胞/视野完整快照 + 按该标尺重算的视野统计，不写任何数据）
+curl -s http://localhost:8080/api/images/$IMG/revisions/<revision_id>
+# -> { "seq": 2, "type": "calibration", "isCurrent": false,
+#      "calib": {"scale": 1, ...}, "cells": [], "fields": [], "fieldStats": [] }
+
+# 3) 恢复：必须携带第 1 步读到的当前版本 currentVersion
+curl -s -X POST http://localhost:8080/api/images/$IMG/revisions/<revision_id>/restore \
+  -H 'Content-Type: application/json' \
+  -d '{"version": 4}'
+# -> 201 { "image": { "version": 5, "calib": ..., "cells": ..., "fields": ..., "fieldStats": ... },
+#         "revision": { "seq": 5, "type": "restore", "restoredFromSeq": 2, ... },
+#         "restoredFrom": { "id": "<revision_id>", "seq": 2, "type": "calibration" } }
+# 时间线此后为 5→4→3→2→1：后来的 fields/contours 修订仍在，已发布报告与更正链不变。
+
+# 版本过期 → 409 + 当前版本（不写入）
+# -> { "error": "草稿已过期：你携带的版本为 v4，当前版本为 v6，请重新读取时间线后再恢复",
+#      "currentVersion": 6 }
+# 修订不存在 / 不属于该切片 → 404（不写入）；缺少整数 version → 400
+```
+
+JavaScript 调用示例（页面内 `API` 封装）：
+
+```js
+const { currentVersion, revisions } = await API.listRevisions(imgId);
+const snapshot = await API.getRevision(imgId, revisions[2].id); // 预览某条修订
+const result = await API.restoreRevision(imgId, revisions[2].id, currentVersion);
+// result.image.version 为新版本；result.revision 为新增的 restore 修订
+```
+
 ## 全部 HTTP 接口一览（既有 + 本轮）
 
 | 方法与路径 | 说明 |
@@ -822,6 +911,9 @@ await contactClusters(process.env.RID, 5);
 | `POST /api/images/:id/publish` | 发布冻结（含视野与统计；带 `version`，过期 409） |
 | **`POST /api/images/:id/migrate/preview`** | **迁移预览：三点对应仿射映射 + 逐细胞校验（不写入；返回预览时目标草稿版本）** |
 | **`POST /api/images/:id/migrate`** | **确认迁移（带预览时版本，过期 409；任一校验失败 400 整批不写入）** |
+| **`GET /api/images/:id/revisions`** | **草稿修订时间线（由新到旧；每次成功写入一条完整快照，失败不留记录）** |
+| **`GET /api/images/:id/revisions/:revId`** | **修订完整快照预览（标尺/细胞/视野 + 按该修订标尺的统计；不存在或跨切片 404）** |
+| **`POST /api/images/:id/revisions/:revId/restore`** | **恢复修订为当前草稿（带读取时 `version`；过期 409 返回当前版本，目标 404，缺版本 400，均不写入；成功追加新修订不抹历史）** |
 | `GET /api/reports` / `GET /api/reports/:id` | 报告列表 / 冻结详情（含 `correctsReportId`、`correctionReason`、`chainId`、`isChainTip`） |
 | **`GET /api/report-chains`** | **更正链列表：每条链的当前有效报告、最近更正原因与历史** |
 | **`GET /api/reports/:id/trace`** | **追溯某份报告所在更正链（根、末端、位置、由旧到新 members）** |

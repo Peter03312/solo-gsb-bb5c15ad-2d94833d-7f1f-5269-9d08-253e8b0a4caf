@@ -124,6 +124,14 @@ class CanvasView {
   }
 
   onDown(e) {
+    const st = this.getState();
+    // 只读模式（如修订预览）：所有绘制/定标/迁移点击一律退化为平移
+    if (st.readOnly) {
+      this.panning = true;
+      this.panStart = { x: e.clientX, y: e.clientY, tx: this.tx, ty: this.ty };
+      this.canvas.classList.add('panning');
+      return;
+    }
     if (e.button === 1 || e.button === 2 || this.tool === 'pan' || this.spaceDown || this.readOnly) {
       this.panning = true;
       this.panStart = { x: e.clientX, y: e.clientY, tx: this.tx, ty: this.ty };
@@ -183,6 +191,7 @@ class CanvasView {
     if (this.readOnly) return;
     if (this.tool !== 'cell' && this.tool !== 'hole' && this.tool !== 'field' && this.tool !== 'fieldhole') return;
     const st = this.getState();
+    if (st.readOnly) return;
     if (st.drawing && st.drawing.points.length >= 3) {
       e.preventDefault();
       this.cb.onFinish && this.cb.onFinish();
@@ -214,6 +223,8 @@ class CanvasView {
     ctx.strokeRect(0, 0, this.natW, this.natH);
 
     const st = this.getState();
+    // 只读模式（修订预览）下强制平移光标
+    if (st.readOnly) this.canvas.classList.add('pan');
     const cells = st.cells || [];
     // 取样视野（黄色）画在细胞之下作为底图
     const fields = st.fields || [];

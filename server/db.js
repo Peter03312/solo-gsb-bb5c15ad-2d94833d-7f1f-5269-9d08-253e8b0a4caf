@@ -59,6 +59,32 @@ function initDb(dataDir) {
       FOREIGN KEY (baseline_report_id) REFERENCES reports(id) ON DELETE CASCADE,
       FOREIGN KEY (retest_report_id) REFERENCES reports(id) ON DELETE CASCADE
     );
+
+    -- 切片草稿修订时间线：每次成功写入（定标/轮廓/视野/迁移/恢复）完整快照一份，
+    -- 只追加、不修改；恢复时再追加一条 restore 修订，旧修订永不抹掉。
+    CREATE TABLE IF NOT EXISTS draft_revisions (
+      id                 TEXT PRIMARY KEY,
+      image_id           TEXT NOT NULL,
+      seq                INTEGER NOT NULL,       -- 切片内单调递增，时间线顺序
+      rev_type           TEXT NOT NULL,          -- baseline/calibration/contours/fields/migration/restore
+      note               TEXT,                   -- 人类可读说明（如迁移来源、基线来源）
+      draft_version      INTEGER NOT NULL,       -- 该次写入完成后的草稿版本
+      width              INTEGER NOT NULL,
+      height             INTEGER NOT NULL,
+      calib              TEXT,                   -- 快照 JSON（同 images.calib）
+      cells              TEXT NOT NULL,          -- 快照 JSON（同 images.cells）
+      fields             TEXT NOT NULL DEFAULT '[]', -- 快照 JSON（同 images.fields）
+      calibrated         INTEGER NOT NULL DEFAULT 0,
+      cell_count         INTEGER NOT NULL DEFAULT 0,
+      field_count        INTEGER NOT NULL DEFAULT 0,
+      restored_from_id   TEXT,                   -- 仅 restore：来源修订 id
+      restored_from_seq  INTEGER,                -- 仅 restore：来源修订序号
+      created_at         TEXT NOT NULL DEFAULT (datetime('now')),
+      UNIQUE (image_id, seq),
+      FOREIGN KEY (image_id) REFERENCES images(id) ON DELETE CASCADE
+    );
+    CREATE INDEX IF NOT EXISTS idx_draft_revisions_image
+      ON draft_revisions(image_id, seq);
   `);
 
   // 旧版本数据库的幂等升级：缺少 fields 列时补上（旧报告缺少视野按空列表读取）
@@ -71,6 +97,9 @@ function initDb(dataDir) {
   // 更正链（本轮）：旧报告两列均为 NULL，自动视为各自链的链末端
   ensureColumn('reports', 'corrects_report_id', `ALTER TABLE reports ADD COLUMN corrects_report_id TEXT`);
   ensureColumn('reports', 'correction_reason', `ALTER TABLE reports ADD COLUMN correction_reason TEXT`);
+
+  // 修订表引入前已存在的旧草稿：以当前状态补建一条可恢复基线（幂等）
+  require('./revisions').ensureBaselines(db);
 
   return db;
 }

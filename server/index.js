@@ -15,6 +15,7 @@ const mergeSvc = require('./merge-stats');
 const transfer = require('./transfer');
 const corrections = require('./corrections');
 const clustersSvc = require('./clusters');
+const revisionsSvc = require('./revisions');
 const { renderAnnotatedPng } = require('./render');
 const { buildReportCsv, buildCombinedCsv, buildComparisonCsv, buildFieldStatsCsv, streamZip } = require('./exporter');
 
@@ -119,6 +120,33 @@ function recompute(cells, calib) {
   });
 }
 
+// 一次成功的草稿写入：同一事务内更新 images（推进版本）并追加一条完整快照修订，
+// 保证「写入成功即留下完整一致的修订」。失败在进入本函数之前已被校验拦截，不留任何记录。
+// patch 为待覆盖的列（calib/cells/fields 中给出哪些就写哪些，其余沿用 current）。
+// 返回水合后的最新草稿。
+function commitDraft(current, patch, type, meta = {}) {
+  const nextCalib = Object.prototype.hasOwnProperty.call(patch, 'calib') ? patch.calib : current.calib;
+  const nextCells = Object.prototype.hasOwnProperty.call(patch, 'cells') ? patch.cells : current.cells;
+  const nextFields = Object.prototype.hasOwnProperty.call(patch, 'fields') ? patch.fields : current.fields;
+
+  const tx = db.transaction(() => {
+    db.prepare(`UPDATE images SET calib = ?, cells = ?, fields = ?, version = version + 1,
+                updated_at = datetime('now') WHERE id = ?`)
+      .run(nextCalib ? JSON.stringify(nextCalib) : null,
+           JSON.stringify(nextCells), JSON.stringify(nextFields), current.id);
+    const row = db.prepare('SELECT version FROM images WHERE id = ?').get(current.id);
+    revisionsSvc.appendRevision(db, current.id, type, {
+      width: current.width,
+      height: current.height,
+      calib: nextCalib,
+      cells: nextCells,
+      fields: nextFields
+    }, row.version, meta);
+  });
+  tx();
+  return getImageOr404(current.id);
+}
+
 // ---------- 图片 ----------
 
 const upload = multer({
@@ -160,9 +188,16 @@ app.post('/api/images', (req, res) => {
       return badRequest(res, '无法读取图片尺寸');
     }
     const id = crypto.randomUUID();
-    db.prepare(`INSERT INTO images (id, filename, stored_name, mime, width, height)
-                VALUES (?, ?, ?, ?, ?, ?)`)
-      .run(id, req.file.originalname, req.file.filename, req.file.mimetype, meta.width, meta.height);
+    const tx = db.transaction(() => {
+      db.prepare(`INSERT INTO images (id, filename, stored_name, mime, width, height)
+                  VALUES (?, ?, ?, ?, ?, ?)`)
+        .run(id, req.file.originalname, req.file.filename, req.file.mimetype, meta.width, meta.height);
+      // 空状态基线修订：新切片的第一条可恢复记录
+      revisionsSvc.appendRevision(db, id, 'baseline', {
+        width: meta.width, height: meta.height, calib: null, cells: [], fields: []
+      }, 1, { note: '上传切片：空草稿基线' });
+    });
+    tx();
     res.status(201).json(getImageOr404(id));
   });
 });
@@ -215,16 +250,12 @@ app.put('/api/images/:id/calibration', (req, res) => {
     scale: dist / pxDist // μm / px
   };
 
-  // 重新定标：草稿中的全部测量按新比例重算
+  // 重新定标：草稿中的全部测量按新比例重算；同一事务留下定标修订
   const cells = recompute(img.cells, calib);
 
-  const tx = db.transaction(() => {
-    db.prepare(`UPDATE images SET calib = ?, cells = ?, version = version + 1,
-                updated_at = datetime('now') WHERE id = ?`)
-      .run(JSON.stringify(calib), JSON.stringify(cells), img.id);
-  });
-  tx();
-  res.json(getImageOr404(img.id));
+  const updated = commitDraft(img, { calib, cells }, 'calibration',
+    { note: `${dist} μm / ${pxDist.toFixed(2)} px = 1 px ${(dist / pxDist).toFixed(6)} μm` });
+  res.json(updated);
 });
 
 // ---------- 轮廓（整批替换，任一对象非法则整次修改不生效） ----------
@@ -259,10 +290,9 @@ app.put('/api/images/:id/contours', (req, res) => {
 
   next = recompute(next, img.calib);
 
-  db.prepare(`UPDATE images SET cells = ?, version = version + 1,
-              updated_at = datetime('now') WHERE id = ?`)
-    .run(JSON.stringify(next), img.id);
-  res.json(getImageOr404(img.id));
+  const updated = commitDraft(img, { cells: next }, 'contours',
+    { note: `${next.length} 个细胞轮廓整批保存` });
+  res.json(updated);
 });
 
 // ---------- 细胞迁移（已发布报告 → 另一张图片草稿，三点对应仿射变换） ----------
@@ -354,11 +384,10 @@ app.post('/api/images/:id/migrate', (req, res) => {
   // 按目标标尺重算追加细胞的测量值；目标原有细胞与标尺原样保留
   const next = img.cells.concat(recompute(appended, img.calib));
 
-  db.prepare(`UPDATE images SET cells = ?, version = version + 1,
-              updated_at = datetime('now') WHERE id = ?`)
-    .run(JSON.stringify(next), img.id);
+  const updated = commitDraft(img, { cells: next }, 'migration', {
+    note: `从报告《${report.title}》迁移 ${appended.length} 个细胞（追加）`
+  });
 
-  const updated = getImageOr404(img.id);
   res.status(201).json({
     image: updated,
     appendedCount: appended.length,
@@ -401,10 +430,9 @@ app.put('/api/images/:id/fields', (req, res) => {
     return badRequest(res, e.message);
   }
 
-  db.prepare(`UPDATE images SET fields = ?, version = version + 1,
-              updated_at = datetime('now') WHERE id = ?`)
-    .run(JSON.stringify(next), img.id);
-  res.json(getImageOr404(img.id));
+  const updated = commitDraft(img, { fields: next }, 'fields',
+    { note: `${next.length} 个取样视野整批保存` });
+  res.json(updated);
 });
 
 // ---------- 多视野合并统计（只读；按当前草稿实时计算） ----------
@@ -428,6 +456,72 @@ app.post('/api/images/:id/field-merge', (req, res) => {
     version: img.version, // 返回计算时的草稿版本，便于调用方识别是否已是最新数据
     calibrated: !!img.calib,
     stats
+  });
+});
+
+// ---------- 草稿修订时间线（只追加）与恢复 ----------
+//
+// 每次成功写入（定标/轮廓/视野/迁移/恢复）都已在同一事务留下完整快照修订；
+// 下列接口只读时间线与快照、或以乐观并发恢复。恢复会【追加】一条 restore 修订，
+// 后来的历史一条都不抹掉；已发布报告与更正链完全不受影响。
+
+app.get('/api/images/:id/revisions', (req, res) => {
+  if (!getImageOr404(req.params.id)) return res.status(404).json({ error: '图片不存在' });
+  res.json({
+    imageId: req.params.id,
+    currentVersion: db.prepare('SELECT version FROM images WHERE id = ?').get(req.params.id).version,
+    revisions: revisionsSvc.listRevisions(db, req.params.id)
+  });
+});
+
+app.get('/api/images/:id/revisions/:revId', (req, res) => {
+  const img = getImageOr404(req.params.id);
+  if (!img) return res.status(404).json({ error: '图片不存在' });
+  // 修订不存在或不属于该切片：同样明确拒绝，不泄露其它切片修订的存在
+  const rev = revisionsSvc.getOwnedRevision(db, req.params.id, req.params.revId, true);
+  if (!rev) return res.status(404).json({ error: '修订不存在，或不属于该切片' });
+  // 按该修订自己的标尺重算测量与视野统计：预览即为恢复后所见的一致结果
+  rev.fieldStats = fieldsSvc.buildFieldStats(rev.fields, rev.cells, rev.calib ? rev.calib.scale : null);
+  rev.isCurrent = img.version === rev.draftVersion;
+  res.json(rev);
+});
+
+// 恢复：请求体 {version} 必须是【读取时间线/快照时】的当前草稿版本。
+app.post('/api/images/:id/revisions/:revId/restore', (req, res) => {
+  const img = getImageOr404(req.params.id);
+  if (!img) return res.status(404).json({ error: '图片不存在' });
+  // 先判定目标修订（不存在/不属于切片 → 404），再做并发判定；任何失败都不写入
+  const target = revisionsSvc.getOwnedRevision(db, req.params.id, req.params.revId, true);
+  if (!target) return res.status(404).json({ error: '修订不存在，或不属于该切片，无法恢复' });
+
+  const version = req.body && req.body.version;
+  if (!Number.isInteger(version)) {
+    return badRequest(res, '恢复必须携带读取时的草稿版本号 version（整数）');
+  }
+  if (version !== img.version) {
+    return res.status(409).json({
+      error: `草稿已过期：你携带的版本为 v${version}，当前版本为 v${img.version}，请重新读取时间线后再恢复`,
+      currentVersion: img.version
+    });
+  }
+
+  // 按恢复的标尺重算测量值（与「重新定标」同一套重算）；视野统计在水合时按新数据给出
+  const cells = recompute(target.cells, target.calib);
+  const updated = commitDraft(img,
+    { calib: target.calib, cells, fields: target.fields },
+    'restore',
+    {
+      restoredFromId: target.id,
+      restoredFromSeq: target.seq,
+      note: `恢复自第 ${target.seq} 条修订（${target.typeLabel}${target.note ? `：${target.note}` : ''}）`
+    });
+
+  const created = db.prepare('SELECT * FROM draft_revisions WHERE image_id = ? ORDER BY seq DESC LIMIT 1')
+    .get(img.id);
+  res.status(201).json({
+    image: updated,
+    revision: revisionsSvc.hydrateRevision(created, { withGeometry: false }),
+    restoredFrom: { id: target.id, seq: target.seq, type: target.type, typeLabel: target.typeLabel }
   });
 });
 
